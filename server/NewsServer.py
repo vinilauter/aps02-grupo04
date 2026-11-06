@@ -64,6 +64,10 @@ class NewsServer:
                 except socket.timeout:
                     self._varrer_expiradas()
                     continue
+                except ConnectionResetError:
+                    # no windows, mandar datagrama para um cliente que fechou faz o
+                    # proximo recvfrom dar erro 10054. e so um aviso, o servidor segue
+                    continue
                 self._entregar(dados, addr)
         except KeyboardInterrupt:
             print("\n[NewsServer] Encerrando...")
