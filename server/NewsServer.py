@@ -21,6 +21,8 @@ class ClienteSessao:
         self.fila = queue.Queue()   # datagramas que chegaram deste cliente
         self.ultimo_contato = time.time()
         self.id_atual = 0   # id do comando que esta sendo atendido
+        self.ultimo_id = None
+        self.ultima_resposta = None
         self.enviarlock = threading.Lock()
 
     def send(self, message): # envia um datagrama para o cliente
@@ -32,7 +34,10 @@ class ClienteSessao:
             return False
 
     def responder(self, message): # resposta do comando atual, com o id na frente
-        return self.send(f"{self.id_atual} {message}")
+        msg_completa = f"{self.id_atual} {message}"
+        self.ultimo_id = self.id_atual
+        self.ultima_resposta = msg_completa
+        return self.send(msg_completa)
 
     def close(self): # avisa a thread da sessao para parar
         self.fila.put(None)
@@ -122,6 +127,10 @@ class NewsServer:
                 dados = sessao.fila.get()
                 if dados is None:   # sessao encerrada
                     break
+                if len(dados) > 8192:
+                    sessao.id_atual = 0
+                    sessao.responder("ERRO mensagem muito grande")
+                    continue
                 try:
                     texto = dados.decode("utf-8").strip()
                 except UnicodeDecodeError:
@@ -137,13 +146,19 @@ class NewsServer:
     def _despachar(self, sessao, texto):
         """atende um datagrama da sessao. retorna False quando a sessao deve ser encerrada"""
         # formato: "<id> COMANDO args", a resposta volta com o mesmo id
-        id_texto, _, comando = texto.partition(" ")
-        if id_texto.isdigit():
-            sessao.id_atual = int(id_texto)
-        else:
+        id_texto, separador, comando = texto.partition(" ")
+        if not id_texto.isdigit() or not separador or not comando.strip():
             sessao.id_atual = 0
-            comando = texto
-        return self.process_command(sessao, comando)
+            sessao.responder("ERRO formato invalido")
+            return True
+
+        req_id = int(id_texto)
+        if req_id == sessao.ultimo_id and sessao.ultima_resposta is not None:
+            sessao.send(sessao.ultima_resposta)
+            return True
+
+        sessao.id_atual = req_id
+        return self.process_command(sessao, comando.strip())
     
     @staticmethod
     def _parse_categories(text):
@@ -243,6 +258,9 @@ class NewsServer:
             apagadas = self.engine.restaurar()
             session.responder(f"OK banco restaurado: {apagadas} noticia(s) apagada(s) | "
                          "categorias: " + ", ".join(self.engine.listar_categorias()))
+
+        elif command == "ACK":
+            return True
 
         elif command == "SAIR":
             session.responder("OK ate logo")
