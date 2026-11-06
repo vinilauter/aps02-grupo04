@@ -20,6 +20,7 @@ class ClienteSessao:
         self.thread = None   # thread que atende somente este cliente
         self.fila = queue.Queue()   # datagramas que chegaram deste cliente
         self.ultimo_contato = time.time()
+        self.id_atual = 0   # id do comando que esta sendo atendido
         self.enviarlock = threading.Lock()
 
     def send(self, message): # envia um datagrama para o cliente
@@ -29,6 +30,9 @@ class ClienteSessao:
             return True
         except OSError:
             return False
+
+    def responder(self, message): # resposta do comando atual, com o id na frente
+        return self.send(f"{self.id_atual} {message}")
 
     def close(self): # avisa a thread da sessao para parar
         self.fila.put(None)
@@ -128,7 +132,14 @@ class NewsServer:
 
     def _despachar(self, sessao, texto):
         """atende um datagrama da sessao. retorna False quando a sessao deve ser encerrada"""
-        return self.process_command(sessao, texto)
+        # formato: "<id> COMANDO args", a resposta volta com o mesmo id
+        id_texto, _, comando = texto.partition(" ")
+        if id_texto.isdigit():
+            sessao.id_atual = int(id_texto)
+        else:
+            sessao.id_atual = 0
+            comando = texto
+        return self.process_command(sessao, comando)
     
     @staticmethod
     def _parse_categories(text):
@@ -143,29 +154,33 @@ class NewsServer:
         command, _, rest = line.partition(" ")
         command = command.upper()
 
-        if command == "INSCREVER":
+        if command == "CONECTAR":
+            # a sessao ja foi criada quando o datagrama chegou
+            session.responder("OK conectado")
+
+        elif command == "INSCREVER":
             cats = self._parse_categories(rest)
             if not cats:
-                session.send("ERRO uso: INSCREVER <categoria>[, <categoria>...]")
+                session.responder("ERRO uso: INSCREVER <categoria>[, <categoria>...]")
                 return True
             valid, invalid = self.engine.assinar(session, cats)
             msg = "OK inscrito em: " + (", ".join(valid) or "(nenhuma)")
             if invalid:
                 msg += " | categorias inexistentes: " + ", ".join(invalid)
-            session.send(msg)
+            session.responder(msg)
 
         elif command == "CANCELAR":
             cats = self._parse_categories(rest)
             if not cats:
-                session.send("ERRO uso: CANCELAR <categoria>[, <categoria>...]")
+                session.responder("ERRO uso: CANCELAR <categoria>[, <categoria>...]")
                 return True
             removed = self.engine.nao_assinar(session, cats)
-            session.send("OK cancelado: " + (", ".join(removed) or "(nenhuma)"))
+            session.responder("OK cancelado: " + (", ".join(removed) or "(nenhuma)"))
 
         elif command == "ADICIONAR":
             cats = self._parse_categories(rest)
             if not cats:
-                session.send("ERRO uso: ADICIONAR <categoria>[, <categoria>...]")
+                session.responder("ERRO uso: ADICIONAR <categoria>[, <categoria>...]")
                 return True
             adicionadas, existentes, invalidas = self.engine.adicionar_categorias(cats)
             msg = "OK categoria adicionada ao sistema: " + (", ".join(adicionadas) or "(nenhuma)")
@@ -173,39 +188,39 @@ class NewsServer:
                 msg += " | ja existiam: " + ", ".join(existentes)
             if invalidas:
                 msg += " | nomes invalidos: " + ", ".join(invalidas)
-            session.send(msg)
+            session.responder(msg)
 
         elif command == "REMOVER":
             cats = self._parse_categories(rest)
             if not cats:
-                session.send("ERRO uso: REMOVER <categoria>[, <categoria>...]")
+                session.responder("ERRO uso: REMOVER <categoria>[, <categoria>...]")
                 return True
             removidas, inexistentes = self.engine.remover_categorias(cats)
             msg = "OK categoria removida do sistema: " + (", ".join(removidas) or "(nenhuma)")
             if inexistentes:
                 msg += " | categorias inexistentes: " + ", ".join(inexistentes)
-            session.send(msg)
+            session.responder(msg)
 
         elif command == "CATEGORIAS":
-            session.send("OK " + ", ".join(self.engine.listar_categorias()))
+            session.responder("OK " + ", ".join(self.engine.listar_categorias()))
 
         elif command == "MINHAS":
             current = self.engine.assinaturas_da_sessao(session)
-            session.send("OK " + (", ".join(current) or "(nenhuma assinatura)"))
+            session.responder("OK " + (", ".join(current) or "(nenhuma assinatura)"))
 
         elif command == "PUBLICAR":
             parts = [self._clean(p) for p in rest.split("|")]
             if len(parts) != 3 or not all(parts):
-                session.send("ERRO uso: PUBLICAR categoria|titulo|resumo")
+                session.responder("ERRO uso: PUBLICAR categoria|titulo|resumo")
                 return True
             category, title, summary = parts
             category = category.lower()
             categorias = self.engine.listar_categorias()
             if category not in categorias:
-                session.send("ERRO categoria inexistente. Disponiveis: " + ", ".join(categorias))
+                session.responder("ERRO categoria inexistente. Disponiveis: " + ", ".join(categorias))
                 return True
             delivered = self.engine.publicar(category, title, summary)
-            session.send(f"OK publicada para {delivered} assinante(s)")
+            session.responder(f"OK publicada para {delivered} assinante(s)")
 
         elif command == "CONEXOES":
             sessoes = self.engine.listar_sessoes()
@@ -215,22 +230,22 @@ class NewsServer:
                 voce = " (voce)" if s is session else ""
                 linhas.append(f"{s.addr[0]}:{s.addr[1]}{voce} -> thread {s.thread.name} "
                               f"id={s.thread.ident} viva={s.thread.is_alive()}")
-            session.send(f"OK {len(sessoes)} conexao(oes) simultanea(s), "
+            session.responder(f"OK {len(sessoes)} conexao(oes) simultanea(s), "
                          f"{len(ids)} thread(s) de cliente distinta(s), "
                          f"{threading.active_count()} thread(s) no processo "
                          f"(1 principal + {len(ids)} de cliente) | " + " | ".join(linhas))
 
         elif command == "RESTAURAR":
             apagadas = self.engine.restaurar()
-            session.send(f"OK banco restaurado: {apagadas} noticia(s) apagada(s) | "
+            session.responder(f"OK banco restaurado: {apagadas} noticia(s) apagada(s) | "
                          "categorias: " + ", ".join(self.engine.listar_categorias()))
 
         elif command == "SAIR":
-            session.send("OK ate logo")
+            session.responder("OK ate logo")
             return False
 
         else:
-            session.send("ERRO comando desconhecido")
+            session.responder("ERRO comando desconhecido")
         return True
 
 
