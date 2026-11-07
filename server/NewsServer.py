@@ -44,9 +44,11 @@ class ClienteSessao:
 
 class NewsServer:
     def __init__(self, host="0.0.0.0", port=5000,
-                 armazenamento="noticias.jsonl"):
+                 armazenamento="noticias.jsonl", timeout=30):
         self.host = host
         self.port = port
+        # segundos sem datagramas para a sessao ser considerada parada
+        self.timeout = timeout
         self.engine = NewsEngine(armazenamento)
         self.servidor_socket = None
         self.sessoes = {}   # endereco -> sessao
@@ -113,7 +115,17 @@ class NewsServer:
 
     def _varrer_expiradas(self):
         """tira as sessoes que pararam de mandar datagramas"""
-        pass
+        agora = time.time()
+        with self.lock_sessoes:
+            expiradas = [s for s in self.sessoes.values()
+                         if agora - s.ultimo_contato > self.timeout]
+            for sessao in expiradas:
+                # tira do dicionario aqui, assim um datagrama novo desse endereco abre outra sessao
+                del self.sessoes[sessao.addr]
+        for sessao in expiradas:
+            print(f"[NewsServer] Sessao expirada por inatividade: {sessao.addr}", flush=True)
+            # a thread da sessao sai do laco e o finally dela tira a sessao do engine
+            sessao.close()
 
     def handle_client(self, sessao):
         self.engine.registrar_sessao(sessao)
@@ -145,6 +157,9 @@ class NewsServer:
 
     def _despachar(self, sessao, texto):
         """atende um datagrama da sessao. retorna False quando a sessao deve ser encerrada"""
+        # ping nao tem id nem resposta, o ultimo_contato ja foi renovado no _entregar
+        if texto.upper() == "PING":
+            return True
         # formato: "<id> COMANDO args", a resposta volta com o mesmo id
         id_texto, separador, comando = texto.partition(" ")
         if not id_texto.isdigit() or not separador or not comando.strip():
@@ -276,6 +291,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--arquivo", default="noticias.jsonl")
+    parser.add_argument("--timeout", type=float, default=30,
+                        help="segundos sem datagramas para a sessao expirar")
     args = parser.parse_args()
 
-    NewsServer(args.host, args.port, args.arquivo).start()
+    NewsServer(args.host, args.port, args.arquivo, args.timeout).start()
