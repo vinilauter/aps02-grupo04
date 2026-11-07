@@ -1,6 +1,6 @@
-# Feed de Noticias PUB/SUB com Sockets TCP
+# Feed de Notícias PUB/SUB com Sockets UDP
 
-## Sumario
+## Sumário
 
 - [Sobre](#sobre)
 - [Como funciona](#como-funciona)
@@ -10,27 +10,30 @@
 - [Comandos do protocolo](#comandos-do-protocolo)
 - [Armazenamento](#armazenamento)
 - [Testes](#testes)
-- [Limitacoes conhecidas](#limitacoes-conhecidas)
+- [Limitações conhecidas](#limitacoes-conhecidas)
 - [Tecnologias utilizadas](#tecnologias-utilizadas)
 
 ## Sobre
 
-Este projeto e um sistema distribuido cliente-servidor que funciona como um feed de noticias continuo, no modelo publicador/assinante (PUB/SUB). A comunicacao e feita com sockets TCP puros, sem broker nem biblioteca externa.
+Este projeto é um sistema distribuído cliente-servidor que funciona como um feed de notícias contínuo, no modelo publicador e assinante (PUB/SUB). A comunicação foi desenvolvida utilizando sockets UDP puros em Python, sem o uso de brokers ou bibliotecas externas.
 
-O servidor mantem uma lista de categorias (por padrao: tecnologia, esportes e cultura) e guarda em arquivo todas as noticias que recebe. Os clientes se conectam, escolhem as categorias que lhes interessam e ficam com a conexao aberta. Quando alguem publica uma noticia, o servidor envia o titulo, o resumo e a categoria na hora, e somente para quem assinou aquele tema. O cliente nao precisa pedir nada para receber.
+O servidor mantém a gestão de categorias de notícias, com padrão inicial em tecnologia, esportes e cultura, além de armazenar o histórico de notícias publicadas em arquivo local. Os clientes realizam o envio de datagramas para registrar sessões, assinar categorias de interesse e publicar novas notícias. Quando uma notícia é publicada, o servidor realiza o envio da mensagem diretamente aos assinantes daquela categoria.
 
-Existe um unico tipo de usuario. Qualquer cliente pode receber noticias, publicar noticias e mexer nas categorias do sistema.
+Existe um único tipo de usuário no sistema. Portanto, qualquer cliente conectado pode assinar temas, receber atualizações em tempo real, publicar notícias e gerenciar as categorias ativas.
 
-O projeto foi desenvolvido para a atividade APS 01 (Grupo 04). A separacao em servidor, engine e cliente foi inspirada no projeto de exemplo do professor (Midd4VC), que organiza o codigo da mesma forma, mas la a comunicacao passa por um broker MQTT e aqui ela e feita direto sobre TCP.
+O projeto foi desenvolvido para a atividade APS 02 (Grupo 04). A arquitetura foi adaptada do modelo cliente-servidor original para operar sobre o protocolo UDP com controle de confiabilidade na camada de aplicação.
 
 ## Como funciona
 
-- O servidor aceita conexoes em loop e cria **uma thread para cada cliente conectado**. Assim, varios clientes sao atendidos ao mesmo tempo sem que um bloqueie o outro.
-- Cada cliente tem uma sessao no servidor, que guarda o socket, o endereco, a thread que o atende e o conjunto de categorias assinadas.
-- Quando uma noticia e publicada, o servidor grava no arquivo, separa os clientes que assinaram a categoria e envia a mensagem para cada um pelo socket que ja esta aberto.
-- No lado do cliente, uma thread fica lendo o socket o tempo todo. Mensagens de noticia e de aviso chegam a qualquer momento e sao entregues a funcoes de tratamento. Respostas a comandos vao para uma fila, que o metodo que enviou o comando espera.
-- Os dados compartilhados (lista de sessoes, assinaturas, categorias e arquivo de noticias) sao protegidos por locks. O envio das mensagens e feito fora do lock principal para que um cliente lento nao trave os demais.
+O servidor escuta datagramas UDP na porta configurada e cria uma thread dedicada para atender cada sessão de cliente identificada pelo endereço (IP e porta). Dessa forma, o atendimento às requisições ocorre de forma paralela.
 
+Cada sessão guarda o endereço do cliente, as categorias assinadas, a fila de datagramas recebidos e o horário do último contato. O servidor valida o limite de 8192 bytes por datagrama. Mensagens que excedem esse tamanho recebem a resposta de erro correspondente.
+
+A confiabilidade dos comandos é garantida por meio de identificadores numéricos crescentes (<id>) enviados pelo cliente. O servidor armazena o último identificador e a última resposta enviada para cada sessão. Caso receba uma mensagem duplicada com o mesmo identificador, o servidor reenvia a resposta armazenada no cache sem reexecutar o comando.
+
+A manutenção da sessão ocorre através de mensagens de PING enviadas periodicamente pelo cliente a cada 10 segundos. O servidor varre a lista de sessões e remove os clientes que permanecem inativos por mais tempo do que o limite definido no parâmetro de timeout (30 segundos por padrão).
+
+As notificações não solicitadas enviadas pelo servidor possuem os formatos abaixo:
 Mensagens que o servidor envia sem ninguem pedir:
 
 ```
@@ -38,34 +41,30 @@ NOTICIA|categoria|titulo|resumo
 INFO texto de aviso
 ```
 
-Respostas a comandos sempre comecam com `OK` ou `ERRO`.
+As respostas aos comandos executados retornam prefixadas pelo identificador da requisição e pela situação da operação (`<id> OK ...` ou `<id> ERRO ...`).
 
 ## Estrutura do projeto
 
 ```
-aps01-grupo04/
+aps02-grupo04/
 |-- server/
-|   |-- NewsServer.py     # socket de escuta, thread por cliente e interpretacao dos comandos
-|   `-- NewsEngine.py     # regras de negocio: sessoes, assinaturas, categorias e armazenamento
-|-- client/
-|   |-- NewsClient.py     # biblioteca do cliente (conexao, thread de leitura e comandos)
-|   `-- usuario.py        # programa de linha de comando do usuario
+|   |-- NewsServer.py     # socket udp de escuta, sessoes e comandos
+|   -- NewsEngine.py     # regras de negocio, sessoes, assinaturas e armazenamento |-- client/ |   |-- NewsClient.py     # biblioteca do cliente, socket udp, reenvio e ping |   -- usuario.py        # interface de linha de comando do usuario
 |-- teste/
-|   `-- teste.py          # testes automatizados de ponta a ponta
-`-- README.md
+|   -- teste.py          # testes automatizados de integracao sobre udp -- README.md
 ```
 
-Dois arquivos sao criados pelo servidor quando ele roda: `noticias.jsonl` e `categorias.json` (veja [Armazenamento](#armazenamento)).
+Dois arquivos são criados pelo servidor durante a execução: `noticias.jsonl` e `categorias.json`.
 
 ## Primeiros passos
 
-Estas instrucoes mostram como colocar o projeto para rodar na sua maquina.
+Estas instruções mostram como executar o projeto em seu ambiente local.
 
-Clone o repositorio e entre na pasta do projeto:
+Primeiro, faça o clone do repositório e acesse a pasta do projeto:
 
 ```bash
 git clone <url-do-repositorio>
-cd aps01-grupo04
+cd aps02-grupo04
 ```
 
 ### Pre-requisitos
@@ -89,18 +88,19 @@ Na raiz do projeto:
 python3 -m server.NewsServer
 ```
 
-O servidor fica ouvindo em `0.0.0.0:5000`. Os parametros opcionais sao:
+O servidor iniciará a escuta no endereço 0.0.0.0:5000 via UDP. Os parâmetros opcionais de inicialização são os seguintes:
 
 | Parametro   | Padrao            | Descricao                          |
 |-------------|-------------------|------------------------------------|
-| `--host`    | `0.0.0.0`         | Endereco em que o servidor escuta  |
-| `--port`    | `5000`            | Porta TCP                          |
-| `--arquivo` | `noticias.jsonl`  | Arquivo onde as noticias sao salvas |
+| `--host`    | `0.0.0.0`         | Endereço IP para vinculação do socket do servidor|
+| `--port`    | `5000`            | Porta UDP para recepção de datagramas|
+| `--arquivo` | `noticias.jsonl`  | Arquivo para persistência do histórico de notícias |
+| `--timeout` | `30`  | Tempo em segundos sem contato para expiração de sessão |
 
 Exemplo:
 
 ```bash
-python3 -m server.NewsServer --port 6000 --arquivo meu_feed.jsonl
+python3 -m server.NewsServer --port 6000 --arquivo meu_feed.jsonl --timeout 15
 ```
 
 ### Rodando o cliente
@@ -116,8 +116,8 @@ Parametros opcionais:
 
 | Parametro      | Padrao      | Descricao                                                       |
 |----------------|-------------|-----------------------------------------------------------------|
-| `--host`       | `127.0.0.1` | Endereco do servidor                                            |
-| `--port`       | `5000`      | Porta do servidor                                               |
+| `--host`       | `127.0.0.1` | Endereço IP do servidor de notícias                                            |
+| `--port`       | `5000`      | Porta UDP do servidor de notícias                                               |
 | `--categorias` | vazio       | Categorias para assinar ao conectar, separadas por virgula      |
 | `--auto`       | desligado   | Publica noticias de exemplo automaticamente, sem prompt         |
 | `--intervalo`  | `5.0`       | Segundos entre as noticias no modo `--auto`                     |
@@ -177,11 +177,7 @@ OK 3 conexao(oes) simultanea(s), 3 thread(s) de cliente distinta(s), 4 thread(s)
     127.0.0.1:39184 -> thread cliente-127.0.0.1:39184 id=139792784283328 viva=True
 ```
 
-O numero de conexoes e igual ao numero de threads de cliente, e cada thread tem um id diferente. O total de threads do processo e sempre uma a mais, que e a thread principal esperando novas conexoes. O log do servidor tambem mostra a thread criada a cada conexao:
-
-```
-[NewsServer] Cliente conectado: ('127.0.0.1', 39158) | thread: cliente-127.0.0.1:39158 (id=139792801068736)
-```
+O relatório exibe o número de sessões UDP ativas, os endereços dos clientes e os identificadores das threads associadas a cada atendimento.
 
 ## Comandos do protocolo
 
@@ -189,21 +185,27 @@ Os comandos podem ser escritos em maiusculas ou minusculas, e os nomes de catego
 
 | Comando | O que faz |
 |---|---|
-| `INSCREVER <cat>[, <cat>...]` | Passa a receber as noticias das categorias informadas. Categorias que nao existem sao listadas na resposta. |
-| `CANCELAR <cat>[, <cat>...]` | Cancela a assinatura das categorias informadas. A categoria continua existindo no sistema. |
-| `CATEGORIAS` | Lista as categorias que existem no sistema. |
-| `MINHAS` | Lista as categorias que voce assina. |
-| `PUBLICAR categoria\|titulo\|resumo` | Cadastra uma noticia e a envia na hora para todos os assinantes da categoria. |
-| `ADICIONAR <cat>[, <cat>...]` | Cria categorias no sistema de forma permanente. |
-| `REMOVER <cat>[, <cat>...]` | Apaga categorias do sistema de forma permanente. |
-| `CONEXOES` | Mostra as conexoes simultaneas e a thread que atende cada cliente. |
-| `RESTAURAR` | Restaura o banco de dados ao estado original. |
-| `SAIR` | Encerra a sessao. |
+| `<id> CONECTAR` | Registra a sessão do cliente no servidor e retorna confirmação de conexão.     |
+| `PING` | Mensagem periódica sem identificador enviada pelo cliente para renovar a sessão no servidor. |
+| `<id> INSCREVER <cat>[, <cat>...]` | Passa a receber as noticias das categorias informadas. Categorias que nao existem sao listadas na resposta. |
+| `<id> CANCELAR <cat>[, <cat>...]` | Cancela a assinatura das categorias informadas. A categoria continua existindo no sistema. |
+| `<id> CATEGORIAS` | Lista as categorias que existem no sistema. |
+| `<id> MINHAS` | Lista as categorias que voce assina. |
+| `<id> PUBLICAR categoria\|titulo\|resumo` | Cadastra uma noticia e a envia na hora para todos os assinantes da categoria. |
+| `<id> ADICIONAR <cat>[, <cat>...]` | Cria categorias no sistema de forma permanente. |
+| `<id> REMOVER <cat>[, <cat>...]` | Apaga categorias do sistema de forma permanente. |
+| `<id> CONEXOES` | Mostra as conexoes simultaneas e a thread que atende cada cliente. |
+| `<id> RESTAURAR` | Restaura o banco de dados ao estado original. |
+| `<id> SAIR` | Encerra a sessao. |
 
 Detalhes que vale saber:
 
+- As respostas do servidor são retornadas no formato `<id> OK ...` ou `<id> ERRO ...`, mantendo o mesmo identificador da requisição original.
+- O cliente realiza até 3 reenvios de um comando caso não receba resposta no intervalo de 1,5 segundos.
+- O servidor ignora reexecuções de comandos com identificadores repetidos da mesma sessão, reenviando a resposta salva em cache.
 - `CANCELAR` e `REMOVER` sao coisas diferentes. `CANCELAR` mexe so na sua assinatura. `REMOVER` apaga a categoria para todo mundo.
 - `ADICIONAR` e `REMOVER` sao permanentes. A mudanca e gravada em `categorias.json` e continua valendo depois de reiniciar o servidor.
+- O tamanho máximo permitido para o payload de um datagrama é de 8192 bytes.
 - Ao remover uma categoria, todos que a assinavam perdem a assinatura. Nao e possivel publicar em uma categoria que nao existe.
 - Quando uma categoria e adicionada ou removida, todos os clientes conectados recebem uma mensagem `INFO` avisando.
 - Nomes de categoria podem ter letras, numeros, hifen e underline. O caractere `|` nao e aceito.
@@ -226,39 +228,40 @@ As noticias de uma categoria removida continuam no `noticias.jsonl` como histori
 
 ## Testes
 
-Os testes sobem um servidor proprio em uma pasta temporaria, entao nao mexem nos seus arquivos de noticias e categorias. Na raiz do projeto:
+A suíte de testes automatizados realiza a validação de integração da aplicação subindo instâncias isoladas do servidor em portas temporárias. Para executar os testes, utilize o comando na raiz do repositório:
 
 ```bash
 python3 teste/teste.py
 ```
 
-O parametro `--port` muda a porta usada (padrao 5050; alguns testes usam a porta seguinte). A saida esperada termina com:
+Saída esperada após a conclusão de todos os cenários:
 
 ```
-57 ok, 0 falha(s)
+63 ok, 0 falha(s)
 ```
 
 O que e verificado:
 
+- estabelecimento de sessão UDP e recepção de mensagem de boas-vindas.
 - conexao, mensagem de boas-vindas e encerramento da sessao;
 - `INSCREVER` e `CANCELAR`, inclusive com categoria inexistente e troca de assinatura no meio da sessao;
 - entrega da noticia apenas para quem assinou a categoria, com acentos preservados;
 - mensagens de erro do protocolo e continuidade da sessao depois de um erro;
 - 10 clientes ao mesmo tempo recebendo a mesma noticia e 3 publicadores enviando em paralelo;
-- `CONEXOES`: uma thread distinta para cada cliente, e as threads somem da lista quando os clientes saem;
-- gravacao correta no arquivo de noticias;
+- Limite de tamanho de datagrama de 8192 bytes.
+- Expiração de sessões inativas por timeout na ausência de mensagens de PING.
 - `RESTAURAR`, `ADICIONAR` e `REMOVER`, incluindo a conferencia de que as categorias continuam como estavam depois de reiniciar o servidor.
 
 ## Limitacoes conhecidas
 
 - Nao ha autenticacao. Qualquer pessoa que alcance a porta do servidor pode publicar, mudar categorias e restaurar o banco.
-- Quem se inscreve em uma categoria recebe apenas as noticias publicadas dali em diante. O historico salvo no arquivo nao e reenviado.
+- Notificações push via UDP não garantem entrega porque o protocolo não confirma o recebimento.
 - O servidor usa uma thread por cliente, o que funciona bem para dezenas de conexoes, mas nao foi pensado para milhares.
 - Um cliente que desconecta perde as assinaturas. Ao voltar, precisa assinar de novo (ou usar `--categorias`).
 
 ## Tecnologias utilizadas
 
-- [Python 3](https://www.python.org/) - linguagem de programacao
-- `socket` - comunicacao TCP
-- `threading` - uma thread por cliente e locks para os dados compartilhados
-- JSON Lines - formato de armazenamento das noticias
+Python 3 - linguagem de programação
+socket - comunicação UDP via datagramas (SOCK_DGRAM)
+threading - gerenciamento de concorrência por sessão e sincronização via locks
+JSON Lines - formato para persistência de dados
