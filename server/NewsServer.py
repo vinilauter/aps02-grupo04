@@ -157,7 +157,7 @@ class NewsServer:
 
     def _despachar(self, sessao, texto):
         """atende um datagrama da sessao. retorna False quando a sessao deve ser encerrada"""
-        # ping nao tem id nem resposta, o ultimo_contato ja foi renovado no _entregar
+        # PING não possui id nem gera resposta, apenas renova o último contato
         if texto.upper() == "PING":
             return True
         # formato: "<id> COMANDO args", a resposta volta com o mesmo id
