@@ -1,4 +1,3 @@
-
 import queue
 import socket
 import threading
@@ -6,6 +5,9 @@ import time
 
 
 class NewsClient:
+
+    # segundos entre cada PING enviado ao servidor
+    PING_INTERVALO = 10
 
     def __init__(self, host="127.0.0.1", port=5000):
         self.host = host
@@ -43,7 +45,24 @@ class NewsClient:
         self._iniciar_ping()
 
     def _iniciar_ping(self):
-        pass
+        """sobe a thread que manda PING para o servidor nao expirar a sessao"""
+        threading.Thread(target=self._ping_loop, daemon=True).start()
+
+    def _ping_loop(self):
+        while self.running:
+            # espera antes de cada ping, o CONECTAR ja conta como contato
+            time.sleep(self.PING_INTERVALO)
+            if not self.running:
+                break
+            try:
+                # ping nao tem id e o servidor nao responde
+                self.sock.send(b"PING")
+            except ConnectionResetError:
+                # servidor fora do ar por um instante, tenta de novo no proximo ciclo
+                continue
+            except OSError:
+                # socket fechado pelo stop()
+                break
 
     def stop(self):
         """encerra a conexão com o servidor """
