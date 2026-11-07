@@ -36,7 +36,7 @@ class NewsClient:
 
 
     def start(self):
-        """inicia a conexão e inicia a thread """
+        """inicia o socket UDP, a thread de leitura e o envio do CONECTAR"""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.connect((self.host, self.port))
         self.running = True
@@ -65,7 +65,7 @@ class NewsClient:
                 break
 
     def stop(self):
-        """encerra a conexão com o servidor """
+        """encerra o socket cliente e as threads de leitura/ping"""
         self.running = False
         if self.sock:
             try:
