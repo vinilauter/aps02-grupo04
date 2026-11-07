@@ -287,7 +287,7 @@ class NewsServer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Servidor de feed de noticias PUB/SUB (TCP)")
+    parser = argparse.ArgumentParser(description="Servidor de feed de noticias PUB/SUB (UDP)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--arquivo", default="noticias.jsonl")
