@@ -40,26 +40,39 @@ def checar(descricao, condicao, detalhe=""):
             print(f"          recebido: {detalhe}")
 
 
-def subir_servidor(porta, arquivo, log):
+def subir_servidor(porta, arquivo, log, timeout=30):
     # roda o servidor como modulo a partir da raiz, igual ao uso normal
     saida = open(log, "w", encoding="utf-8")
     processo = subprocess.Popen(
         [sys.executable, "-m", "server.NewsServer", "--host", HOST,
-         "--port", str(porta), "--arquivo", arquivo],
+         "--port", str(porta), "--arquivo", arquivo, "--timeout", str(timeout)],
         cwd=RAIZ, stdout=saida, stderr=subprocess.STDOUT)
 
-    # espera a porta abrir ou o processo morrer
+    # espera a porta abrir usando UDP: envia 1 CONECTAR e aguarda resposta OK conectado
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.5)
     limite = time.time() + 5
     while time.time() < limite:
         if processo.poll() is not None:
+            sock.close()
             print("[teste] o servidor encerrou antes de abrir a porta")
             return None
         try:
-            socket.create_connection((HOST, porta), timeout=0.5).close()
-            return processo
+            sock.sendto(b"1 CONECTAR", (HOST, porta))
+            while True:
+                dados, _ = sock.recvfrom(8192)
+                texto = dados.decode("utf-8")
+                if "OK conectado" in texto:
+                    sock.sendto(b"2 SAIR", (HOST, porta))
+                    sock.close()
+                    time.sleep(ESPERA_SAIDA)
+                    return processo
+        except socket.timeout:
+            time.sleep(0.1)
         except OSError:
             time.sleep(0.1)
 
+    sock.close()
     print("[teste] o servidor nao abriu a porta a tempo")
     processo.kill()
     return None
@@ -290,15 +303,16 @@ class ServidorProprio:
     """Servidor com arquivos temporarios proprios, para os testes que alteram
     o banco (categorias e noticias) sem atrapalhar os outros testes."""
 
-    def __init__(self, porta):
+    def __init__(self, porta, timeout=30):
         self.porta = porta
+        self.timeout = timeout
         pasta = tempfile.mkdtemp(prefix="feed_banco_")
         self.arquivo = os.path.join(pasta, "noticias.jsonl")
         self.log = os.path.join(pasta, "servidor.log")
         self.processo = None
 
     def subir(self):
-        self.processo = subir_servidor(self.porta, self.arquivo, self.log)
+        self.processo = subir_servidor(self.porta, self.arquivo, self.log, timeout=self.timeout)
         return self.processo is not None
 
     def derrubar(self):
@@ -458,6 +472,96 @@ def teste_conexoes(porta, quantidade=5):
            resumo.startswith("OK 1 conexao(oes) simultanea(s)"), resumo)
     encerrar(novo)
 
+# Novos testes exigidos para a Pessoa 5
+def _recv_ignoring_info(sock, timeout=2.0):
+    limite = time.time() + timeout
+    while time.time() < limite:
+        try:
+            dados, _ = sock.recvfrom(8192)
+            texto = dados.decode("utf-8", errors="ignore")
+            if texto.startswith("INFO "):
+                continue
+            return texto
+        except socket.timeout:
+            break
+    return ""
+
+def teste_id_duplicado(porta):
+    print("\nID duplicado (socket cru)")
+    servidor = ServidorProprio(porta)
+    if not servidor.subir():
+        checar("servidor proprio subiu", False)
+        return
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(2.0)
+        addr = (HOST, porta)
+
+        # Primeiro CONECTAR
+        sock.sendto(b"1 CONECTAR", addr)
+        resp1 = _recv_ignoring_info(sock)
+        checar("CONECTAR responde OK", "1 OK conectado" in resp1, resp1)
+
+        # PUBLICAR com id 2
+        cmd = b"2 PUBLICAR tecnologia|Titulo Dup|Resumo Dup"
+        sock.sendto(cmd, addr)
+        resp2 = _recv_ignoring_info(sock)
+        checar("PUBLICAR responde OK", "2 OK publicada" in resp2, resp2)
+
+        # Reenviar exatamente o mesmo ID 2
+        sock.sendto(cmd, addr)
+        resp3 = _recv_ignoring_info(sock)
+        checar("reenvio responde a mesma mensagem gravada", resp2 == resp3, resp3)
+
+        # Conferir que no arquivo so gravou 1 noticia
+        total = servidor.total_noticias()
+        checar("mesmo id enviado 2 vezes grava 1 noticia so", total == 1, f"total={total}")
+
+        sock.sendto(b"3 SAIR", addr)
+        sock.close()
+    finally:
+        servidor.derrubar()
+
+def teste_timeout_expiracao(porta):
+    print("\nexpiracao de sessao por timeout")
+    servidor = ServidorProprio(porta, timeout=2)
+    if not servidor.subir():
+        checar("servidor proprio subiu", False)
+        return
+    try:
+        # Cliente 1 via socket cru (sem PING)
+        sock_parado = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock_parado.sendto(b"1 CONECTAR", (HOST, porta))
+        _recv_ignoring_info(sock_parado)
+
+        # Cliente 2 usando NewsClient (com PING ativo)
+        cliente_ativo = novo_cliente(porta)
+        cliente_ativo.infos.get(timeout=ESPERA_NOTICIA)
+
+        # Espera 3.5 segundos para dar tempo do cliente sem PING expirar (> 2s)
+        time.sleep(3.5)
+
+        resposta = cliente_ativo.connections()
+        checar("sessao sem PING sumiu do CONEXOES", "1 conexao(oes) simultanea(s)" in resposta, resposta)
+
+        encerrar(cliente_ativo)
+        sock_parado.close()
+    finally:
+        servidor.derrubar()
+
+def teste_tamanho_limite(porta):
+    print("\nlimite de tamanho de datagrama (9000 bytes)")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(2.0)
+    addr = (HOST, porta)
+
+    # envia datagrama com 9000 bytes
+    payload = b"1 PUBLICAR tecnologia|" + (b"A" * 8980)
+    sock.sendto(payload, addr)
+    texto = _recv_ignoring_info(sock)
+    checar("datagrama de 9000 bytes recebe ERRO mensagem muito grande", "ERRO mensagem muito grande" in texto, texto)
+    sock.close()
+
 def main():
     parser = argparse.ArgumentParser(description="Testes do feed de noticias PUB/SUB")
     parser.add_argument("--port", type=int, default=5050, help="porta usada pelo servidor de teste")
@@ -473,7 +577,7 @@ def main():
         mostrar_log(log)
         sys.exit(1)
 
-    testes = [teste_conexao, teste_assinaturas, teste_entrega, teste_erros, teste_simultaneos, teste_conexoes]
+    testes = [teste_conexao, teste_assinaturas, teste_entrega, teste_erros, teste_simultaneos, teste_conexoes, teste_tamanho_limite]
     publicadas = 0
     try:
         for teste in testes:
@@ -487,9 +591,8 @@ def main():
 
     teste_armazenamento(arquivo, publicadas)
 
-    
-    # testes que alteram o banco rodam em servidores proprios, em outra porta
-    for teste in (teste_restaurar, teste_remover_categoria, teste_adicionar_categoria):
+    # testes que alteram o banco ou usam configuracoes proprias rodam em servidores proprios
+    for teste in (teste_restaurar, teste_remover_categoria, teste_adicionar_categoria, teste_id_duplicado, teste_timeout_expiracao):
         try:
             teste(args.port + 1)
         except Exception as erro:
