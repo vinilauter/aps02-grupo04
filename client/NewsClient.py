@@ -2,6 +2,7 @@
 import queue
 import socket
 import threading
+import time
 
 
 class NewsClient:
@@ -13,6 +14,7 @@ class NewsClient:
         self.running = False
         self._responses = queue.Queue()
         self._send_lock = threading.Lock()
+        self._request_id = 0
         self.news_handler = None
         self.info_handler = None
         self.closed_handler = None
@@ -33,9 +35,15 @@ class NewsClient:
 
     def start(self):
         """inicia a conexão e inicia a thread """
-        self.sock = socket.create_connection((self.host, self.port))
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.connect((self.host, self.port))
         self.running = True
         threading.Thread(target=self._receive_loop, daemon=True).start()
+        self.send_command("CONECTAR")
+        self._iniciar_ping()
+
+    def _iniciar_ping(self):
+        pass
 
     def stop(self):
         """encerra a conexão com o servidor """
@@ -47,13 +55,18 @@ class NewsClient:
                 pass
 
     def _receive_loop(self):
-        """le continuamente o fluxo de dados enviados pelo servidor"""
+        """le continuamente os datagramas enviados pelo servidor"""
         try:
-            with self.sock.makefile("r", encoding="utf-8", newline="\n") as f:
-                for line in f:
-                    self._dispatch(line.rstrip("\n"))
-        except (OSError, ValueError):
-            pass
+            while self.running:
+                try:
+                    data = self.sock.recv(8192)
+                except ConnectionResetError:
+                    if self.running:
+                        continue
+                    break
+                except OSError:
+                    break
+                self._dispatch(data.decode("utf-8"))
         finally:
             self.running = False
             if self.closed_handler:
@@ -69,16 +82,34 @@ class NewsClient:
             if self.info_handler:
                 self.info_handler(line[5:])
         else:
-            self._responses.put(line)
+            request_id, separator, response = line.partition(" ")
+            if separator and request_id.isdigit():
+                self._responses.put((int(request_id), response))
+            else:
+                self._responses.put((None, line))
 
     # comandos do protocolo
-    def send_command(self, command, timeout=5):
-        """envia um comando via socket"""
+    def send_command(self, command, timeout=1.5):
+        """envia um comando e aguarda uma resposta com o mesmo id"""
         with self._send_lock:
-            self.sock.sendall((command + "\n").encode("utf-8"))
-        try:
-            return self._responses.get(timeout=timeout)
-        except queue.Empty:
+            self._request_id += 1
+            request_id = self._request_id
+            message = f"{request_id} {command}".encode("utf-8")
+
+            for _ in range(4):
+                self.sock.send(message)
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        response_id, response = self._responses.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if response_id == request_id:
+                        return response
+
             return "ERRO sem resposta do servidor"
 
     def subscribe(self, categories):
